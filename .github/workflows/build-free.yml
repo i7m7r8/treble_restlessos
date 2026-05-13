@@ -3,10 +3,10 @@ name: Build RestlessOS GSI (Free Runner)
 on:
   workflow_dispatch:
     inputs:
-      build_target:
-        description: 'Build target (e.g., treble_arm64_bvN-userdebug)'
+      release_channel:
+        description: 'GrapheneOS release channel (stable/beta/alpha)'
         required: true
-        default: 'treble_arm64_bvN-userdebug'
+        default: 'stable'
 
 jobs:
   build:
@@ -25,6 +25,9 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up build environment
         run: |
@@ -38,27 +41,67 @@ jobs:
           chmod a+x ~/bin/repo
           echo "PATH=$PATH:$HOME/bin" >> $GITHUB_ENV
 
+      - name: Resolve latest GrapheneOS tag
+        run: |
+          mkdir -p tmp
+          CHANNEL="${{ github.event.inputs.release_channel }}"
+          RELEASES_HTML=$(curl --fail --silent "https://grapheneos.org/releases")
+          TAG=$(echo "${RELEASES_HTML}" \
+            | grep --only-matching --perl-regexp "id=[a-z]+-${CHANNEL}><td>[^<]+</td><td><a href=#\K[0-9]{10}" \
+            | sort --numeric-sort --reverse | head --lines=1)
+          if [ -z "${TAG}" ]; then
+            echo "ERROR: failed to extract a valid ${CHANNEL} tag"
+            exit 1
+          fi
+          echo "Resolved tag: ${TAG}"
+          echo "${TAG}" > tmp/.grapheneos_tag
+
       - name: Sync Source
         run: |
-          # Use shallow clone to save space
-          repo init -u https://github.com/RestlessOS/manifest.git -b android-16.0 --depth=1
+          mkdir -p src
+          cd src
+          GRAPHENEOS_TAG=$(cat ../tmp/.grapheneos_tag)
+          repo init --depth=1 --git-lfs \
+            --manifest-branch "refs/tags/${GRAPHENEOS_TAG}" \
+            --manifest-url https://github.com/GrapheneOS/platform_manifest.git
+          mkdir -p .repo/local_manifests
+          cp ../configs/manifests/*.xml .repo/local_manifests/
           repo sync -c -j$(nproc) --no-tags --no-clone-bundle
+          
+          # Crucial space optimization: remove .repo after sync
+          # rm -rf .repo
 
       - name: Apply Patches
         run: |
-          bash patches/apply.sh trebledroid
-          bash patches/apply.sh trebledroid-staging
-          bash patches/apply.sh rom
-          bash patches/apply.sh personal
+          cd src
+          ../patches/apply.sh . trebledroid
+          ../patches/apply.sh . trebledroid-staging
+          ../patches/apply.sh . rom
+          ../patches/apply.sh . personal
+          ../patches/apply.sh . release-builds
+
+      - name: Build TrebleApp
+        run: |
+          cd src/treble_app
+          bash build.sh release
 
       - name: Build GSI
         run: |
+          cd src
+          AOSP_TAG=$(grep --max-count=1 "aosp_revision:" .repo/manifests/config.yml | sed "s/.*: *//")
+          ANDROID_VERSION_TAG=$(grep --max-count=1 "target:" build/release/release_config_map.textproto | sed "s/.*\\"\([^\\"]*\)\\".*/\1/")
+          
+          pushd device/phh/treble
+            cp --force ../../../../configs/rom/rom.mk .
+            bash generate.sh rom
+          popd
+          
           source build/envsetup.sh
-          lunch ${{ github.event.inputs.build_target }}
+          lunch "treble_arm64_bvN-${ANDROID_VERSION_TAG}-user"
           make -j$(nproc) systemimage
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: restlessos-gsi
-          path: out/target/product/*/system.img
+          path: src/out/target/product/*/system.img
