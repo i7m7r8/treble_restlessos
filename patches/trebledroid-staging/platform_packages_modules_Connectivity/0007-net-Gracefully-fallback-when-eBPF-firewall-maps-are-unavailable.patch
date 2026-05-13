@@ -47,12 +47,11 @@ The patch does NOT implement missing kernel features.
 It only ensures the framework degrades gracefully instead of crashing.
 
 Additional changes for RestlessOS:
-- Narrow catch scope from Throwable to ErrnoException in BpfNetMapsUtils
+- Catch Throwable instead of ErrnoException in BpfNetMapsUtils
   isChainEnabled(), getUidRule(), and getDataSaverEnabled().
-  This prevents programming errors (NPE, IllegalStateException, etc.)
-  from being silently swallowed and turning the firewall fail-open on
-  devices with working BPF.  Only genuine BPF map errors (ENOENT,
-  EINVAL, EBADF, etc.) now trigger the safe fallback.  The rest of the
+  This ensures that BPF-related failures (including NPEs from missing
+  maps) result in a safe "fail-open" fallback instead of crashing the
+  connectivity stack or blocking all network access.  The rest of the
   patch is kept intact -- per-map try/catch in NetworkStatsService,
   Log.wtf() -> Log.e() for map open failures, and null guards in
   SkDestroyListener.
@@ -68,12 +67,13 @@ index 287116a..9a8d416 100644
 @@ -220,8 +220,10 @@ public class BpfNetMapsUtils {
              final U32 config = configurationMap.getValue(UID_RULES_CONFIGURATION_KEY);
              return (config.val & match) != 0;
-         } catch (ErrnoException e) {
+-        } catch (ErrnoException e) {
 -            throw new ServiceSpecificException(e.errno,
 -                    "Unable to get firewall chain status: " + Os.strerror(e.errno));
++        } catch (Throwable t) {
 +            android.util.Log.w("BpfNetMapsUtils",
 +                    "Unable to get firewall chain status, assuming disabled: "
-+                            + Os.strerror(e.errno));
++                            + t);
 +            return false;
          }
      }
@@ -81,12 +81,13 @@ index 287116a..9a8d416 100644
 @@ -249,8 +251,10 @@ public class BpfNetMapsUtils {
              final boolean isMatchEnabled = uidMatch != null && (uidMatch.rule & match) != 0;
              return isMatchEnabled == isAllowList ? FIREWALL_RULE_ALLOW : FIREWALL_RULE_DENY;
-         } catch (ErrnoException e) {
+-        } catch (ErrnoException e) {
 -            throw new ServiceSpecificException(e.errno,
 -                    "Unable to get uid rule status: " + Os.strerror(e.errno));
++        } catch (Throwable t) {
 +            android.util.Log.w("BpfNetMapsUtils",
 +                    "Unable to get uid rule, defaulting to ALLOW: "
-+                            + Os.strerror(e.errno));
++                            + t);
 +            return FIREWALL_RULE_ALLOW;
          }
      }
@@ -94,12 +95,13 @@ index 287116a..9a8d416 100644
 @@ -374,8 +378,10 @@ public class BpfNetMapsUtils {
          try {
              return dataSaverEnabledMap.getValue(DATA_SAVER_ENABLED_KEY).val == DATA_SAVER_ENABLED;
-         } catch (ErrnoException e) {
+-        } catch (ErrnoException e) {
 -            throw new ServiceSpecificException(e.errno, "Unable to get data saver: "
 -                    + Os.strerror(e.errno));
++        } catch (Throwable t) {
 +            android.util.Log.w("BpfNetMapsUtils",
 +                    "Unable to get data saver state, assuming disabled: "
-+                            + Os.strerror(e.errno));
++                            + t);
 +            return false;
          }
      }
@@ -216,4 +218,3 @@ index 1553bff..365aed4 100644
          }
 -- 
 2.53.0
-
